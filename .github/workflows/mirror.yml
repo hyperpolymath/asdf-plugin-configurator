@@ -1,12 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# Security-hardened hub-and-spoke mirror workflow
+# Mirrors GitHub (hub) to GitLab, Codeberg, and Bitbucket (spokes)
 name: Mirror to GitLab/Codeberg/Bitbucket
 
 on:
   push:
     branches: [main, master]
   workflow_dispatch:
+    inputs:
+      force_mirror:
+        description: 'Force mirror even if refs match (use with caution)'
+        required: false
+        default: 'false'
+        type: boolean
 
 permissions: read-all
+
+env:
+  # Retry configuration for network resilience
+  PUSH_RETRY_COUNT: 3
+  PUSH_RETRY_DELAY: 5
 
 jobs:
   mirror-gitlab:
@@ -16,14 +29,58 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4
         with:
           fetch-depth: 0
+
+      - name: Configure SSH known_hosts for GitLab
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -t ed25519,rsa gitlab.com >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+
       - uses: webfactory/ssh-agent@dc588b651fe13675774614f8e6a936a468676387 # v0.9.0
         with:
           ssh-private-key: ${{ secrets.GITLAB_SSH_KEY }}
+
       - name: Mirror to GitLab
         run: |
-          git remote add gitlab git@gitlab.com:hyperpolymath/${GITHUB_REPOSITORY#*/}.git || true
-          git push gitlab --all --force
-          git push gitlab --tags --force
+          set -euo pipefail
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          REMOTE_URL="git@gitlab.com:hyperpolymath/${REPO_NAME}.git"
+
+          echo "::group::Configuring GitLab remote"
+          git remote add gitlab "${REMOTE_URL}" 2>/dev/null || git remote set-url gitlab "${REMOTE_URL}"
+          echo "Remote configured: ${REMOTE_URL}"
+          echo "::endgroup::"
+
+          echo "::group::Pushing branches to GitLab"
+          for i in $(seq 1 $PUSH_RETRY_COUNT); do
+            if git push gitlab --all --force-with-lease; then
+              echo "Branch push succeeded"
+              break
+            fi
+            if [ $i -eq $PUSH_RETRY_COUNT ]; then
+              echo "::error::Branch push failed after $PUSH_RETRY_COUNT attempts"
+              exit 1
+            fi
+            echo "::warning::Push attempt $i failed, retrying in ${PUSH_RETRY_DELAY}s..."
+            sleep $PUSH_RETRY_DELAY
+          done
+          echo "::endgroup::"
+
+          echo "::group::Pushing tags to GitLab"
+          for i in $(seq 1 $PUSH_RETRY_COUNT); do
+            if git push gitlab --tags --force-with-lease; then
+              echo "Tag push succeeded"
+              break
+            fi
+            if [ $i -eq $PUSH_RETRY_COUNT ]; then
+              echo "::error::Tag push failed after $PUSH_RETRY_COUNT attempts"
+              exit 1
+            fi
+            echo "::warning::Tag push attempt $i failed, retrying in ${PUSH_RETRY_DELAY}s..."
+            sleep $PUSH_RETRY_DELAY
+          done
+          echo "::endgroup::"
 
   mirror-codeberg:
     runs-on: ubuntu-latest
@@ -32,14 +89,58 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4
         with:
           fetch-depth: 0
+
+      - name: Configure SSH known_hosts for Codeberg
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -t ed25519,rsa codeberg.org >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+
       - uses: webfactory/ssh-agent@dc588b651fe13675774614f8e6a936a468676387 # v0.9.0
         with:
           ssh-private-key: ${{ secrets.CODEBERG_SSH_KEY }}
+
       - name: Mirror to Codeberg
         run: |
-          git remote add codeberg git@codeberg.org:hyperpolymath/${GITHUB_REPOSITORY#*/}.git || true
-          git push codeberg --all --force
-          git push codeberg --tags --force
+          set -euo pipefail
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          REMOTE_URL="git@codeberg.org:hyperpolymath/${REPO_NAME}.git"
+
+          echo "::group::Configuring Codeberg remote"
+          git remote add codeberg "${REMOTE_URL}" 2>/dev/null || git remote set-url codeberg "${REMOTE_URL}"
+          echo "Remote configured: ${REMOTE_URL}"
+          echo "::endgroup::"
+
+          echo "::group::Pushing branches to Codeberg"
+          for i in $(seq 1 $PUSH_RETRY_COUNT); do
+            if git push codeberg --all --force-with-lease; then
+              echo "Branch push succeeded"
+              break
+            fi
+            if [ $i -eq $PUSH_RETRY_COUNT ]; then
+              echo "::error::Branch push failed after $PUSH_RETRY_COUNT attempts"
+              exit 1
+            fi
+            echo "::warning::Push attempt $i failed, retrying in ${PUSH_RETRY_DELAY}s..."
+            sleep $PUSH_RETRY_DELAY
+          done
+          echo "::endgroup::"
+
+          echo "::group::Pushing tags to Codeberg"
+          for i in $(seq 1 $PUSH_RETRY_COUNT); do
+            if git push codeberg --tags --force-with-lease; then
+              echo "Tag push succeeded"
+              break
+            fi
+            if [ $i -eq $PUSH_RETRY_COUNT ]; then
+              echo "::error::Tag push failed after $PUSH_RETRY_COUNT attempts"
+              exit 1
+            fi
+            echo "::warning::Tag push attempt $i failed, retrying in ${PUSH_RETRY_DELAY}s..."
+            sleep $PUSH_RETRY_DELAY
+          done
+          echo "::endgroup::"
 
   mirror-bitbucket:
     runs-on: ubuntu-latest
@@ -48,11 +149,55 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4
         with:
           fetch-depth: 0
+
+      - name: Configure SSH known_hosts for Bitbucket
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -t ed25519,rsa bitbucket.org >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+
       - uses: webfactory/ssh-agent@dc588b651fe13675774614f8e6a936a468676387 # v0.9.0
         with:
           ssh-private-key: ${{ secrets.BITBUCKET_SSH_KEY }}
+
       - name: Mirror to Bitbucket
         run: |
-          git remote add bitbucket git@bitbucket.org:hyperpolymath/${GITHUB_REPOSITORY#*/}.git || true
-          git push bitbucket --all --force
-          git push bitbucket --tags --force
+          set -euo pipefail
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          REMOTE_URL="git@bitbucket.org:hyperpolymath/${REPO_NAME}.git"
+
+          echo "::group::Configuring Bitbucket remote"
+          git remote add bitbucket "${REMOTE_URL}" 2>/dev/null || git remote set-url bitbucket "${REMOTE_URL}"
+          echo "Remote configured: ${REMOTE_URL}"
+          echo "::endgroup::"
+
+          echo "::group::Pushing branches to Bitbucket"
+          for i in $(seq 1 $PUSH_RETRY_COUNT); do
+            if git push bitbucket --all --force-with-lease; then
+              echo "Branch push succeeded"
+              break
+            fi
+            if [ $i -eq $PUSH_RETRY_COUNT ]; then
+              echo "::error::Branch push failed after $PUSH_RETRY_COUNT attempts"
+              exit 1
+            fi
+            echo "::warning::Push attempt $i failed, retrying in ${PUSH_RETRY_DELAY}s..."
+            sleep $PUSH_RETRY_DELAY
+          done
+          echo "::endgroup::"
+
+          echo "::group::Pushing tags to Bitbucket"
+          for i in $(seq 1 $PUSH_RETRY_COUNT); do
+            if git push bitbucket --tags --force-with-lease; then
+              echo "Tag push succeeded"
+              break
+            fi
+            if [ $i -eq $PUSH_RETRY_COUNT ]; then
+              echo "::error::Tag push failed after $PUSH_RETRY_COUNT attempts"
+              exit 1
+            fi
+            echo "::warning::Tag push attempt $i failed, retrying in ${PUSH_RETRY_DELAY}s..."
+            sleep $PUSH_RETRY_DELAY
+          done
+          echo "::endgroup::"
