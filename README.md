@@ -1,1 +1,1 @@
-# asdf=plugin-configurator
+# asdf-plugin-configurator
