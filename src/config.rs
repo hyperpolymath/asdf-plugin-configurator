@@ -27,7 +27,7 @@ fn default_version() -> String {
 }
 
 /// Individual plugin configuration
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginConfig {
     /// Version constraint (e.g., "^20.0.0", ">=1.70.0", "~3.11.0")
     pub version: String,
@@ -54,7 +54,7 @@ fn default_source() -> String {
 }
 
 /// Global settings
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Settings {
     /// Prefer hyperpolymath plugins over official
     #[serde(default)]

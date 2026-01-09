@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! asdf-config: Declarative configuration management for asdf plugins
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use std::path::PathBuf;
 
 mod config;
 mod commands;
+mod registry;
 
 use commands::{init, validate, list, install, sync, export};
 
@@ -127,14 +128,115 @@ fn main() -> Result<()> {
 
 fn search(query: &str, verbose: bool) -> Result<()> {
     println!("{} Searching for '{}'...", "→".blue(), query);
+    println!();
 
-    // TODO: Fetch from metaiconic registry
-    println!("{}", "Note: Search requires asdf-metaiconic-plugin registry".yellow());
-    println!("Registry URL: https://github.com/hyperpolymath/asdf-metaiconic-plugin");
+    let registry = match registry::Registry::new() {
+        Ok(r) => r,
+        Err(e) => {
+            if verbose {
+                println!("{} Failed to initialize registry: {}", "!".yellow(), e);
+            }
+            println!("{} Falling back to local search", "ℹ".blue());
+            return search_local(query);
+        }
+    };
 
-    if verbose {
-        println!("{} This feature will query the metaiconic plugin registry", "ℹ".cyan());
+    match registry.search_plugins(query) {
+        Ok(plugins) => {
+            if plugins.is_empty() {
+                println!("{} No plugins found matching '{}'", "!".yellow(), query);
+                println!();
+                println!("Try searching for:");
+                println!("  {} asdf-config search nodejs", "•".dimmed());
+                println!("  {} asdf-config search rust", "•".dimmed());
+                println!("  {} asdf-config search terraform", "•".dimmed());
+            } else {
+                println!("{} Found {} plugins:", "✓".green(), plugins.len());
+                println!();
+
+                for plugin in &plugins {
+                    let stars = if plugin.stars > 0 {
+                        format!(" ⭐ {}", plugin.stars)
+                    } else {
+                        String::new()
+                    };
+                    println!("  {} {}{}", "•".cyan(), plugin.name.bold(), stars.dimmed());
+                    println!("    {}", plugin.description.dimmed());
+                    if verbose {
+                        println!("    {}", plugin.url.cyan());
+                    }
+                    println!();
+                }
+
+                println!("{} Add a plugin to your config with:", "ℹ".blue());
+                println!("  asdf-config init && edit .asdf-config.yaml");
+            }
+        }
+        Err(e) => {
+            if verbose {
+                println!("{} Search failed: {}", "✗".red(), e);
+            }
+            println!("{} GitHub API unavailable, using local search", "!".yellow());
+            return search_local(query);
+        }
     }
+
+    Ok(())
+}
+
+/// Local fallback search using known plugins
+fn search_local(query: &str) -> Result<()> {
+    let known_plugins = vec![
+        ("nodejs", "Node.js runtime", "language"),
+        ("python", "Python interpreter", "language"),
+        ("ruby", "Ruby interpreter", "language"),
+        ("rust", "Rust toolchain", "language"),
+        ("golang", "Go programming language", "language"),
+        ("deno", "Deno runtime", "language"),
+        ("java", "Java Development Kit", "language"),
+        ("kotlin", "Kotlin compiler", "language"),
+        ("elixir", "Elixir language", "language"),
+        ("erlang", "Erlang/OTP", "language"),
+        ("postgres", "PostgreSQL database", "database"),
+        ("mysql", "MySQL database", "database"),
+        ("redis", "Redis in-memory store", "database"),
+        ("mongodb", "MongoDB database", "database"),
+        ("kubectl", "Kubernetes CLI", "tool"),
+        ("helm", "Kubernetes package manager", "tool"),
+        ("terraform", "Infrastructure as code", "tool"),
+        ("packer", "Image builder", "tool"),
+        ("vault", "Secrets management", "security"),
+        ("trivy", "Security scanner", "security"),
+        ("grype", "Vulnerability scanner", "security"),
+        ("cosign", "Container signing", "security"),
+        ("nickel", "Configuration language", "config"),
+        ("dhall", "Programmable configuration", "config"),
+        ("yq", "YAML processor", "config"),
+    ];
+
+    let query_lower = query.to_lowercase();
+    let matches: Vec<_> = known_plugins
+        .iter()
+        .filter(|(name, desc, _)| {
+            name.contains(&query_lower) || desc.to_lowercase().contains(&query_lower)
+        })
+        .collect();
+
+    if matches.is_empty() {
+        println!("{} No local plugins found matching '{}'", "!".yellow(), query);
+    } else {
+        println!("{} Found {} plugins (local cache):", "✓".green(), matches.len());
+        println!();
+
+        for (name, desc, category) in matches {
+            println!("  {} {} [{}]", "•".cyan(), name.bold(), category.dimmed());
+            println!("    {}", desc.dimmed());
+            println!();
+        }
+    }
+
+    println!("{} For more plugins, visit: {}", "ℹ".blue(),
+             "https://github.com/asdf-vm/asdf-plugins".cyan());
 
     Ok(())
 }
