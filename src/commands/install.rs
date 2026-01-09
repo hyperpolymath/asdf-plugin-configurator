@@ -7,6 +7,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::config::Config;
+use crate::registry::{Registry, Version, resolve_version};
 
 pub fn run(config_path: &Path, plugin: Option<&str>, dry_run: bool, verbose: bool) -> Result<()> {
     if !config_path.exists() {
@@ -29,6 +30,9 @@ pub fn run(config_path: &Path, plugin: Option<&str>, dry_run: bool, verbose: boo
         return Ok(());
     }
 
+    // Initialize registry for version resolution
+    let registry = Registry::new().ok();
+
     println!("{} Installing {} plugin(s){}",
         "→".blue(),
         plugins_to_install.len(),
@@ -39,13 +43,28 @@ pub fn run(config_path: &Path, plugin: Option<&str>, dry_run: bool, verbose: boo
     for (name, plugin_config) in &plugins_to_install {
         let source = get_plugin_source(name, &plugin_config.source);
 
+        // Resolve version constraint to actual version
+        let resolved_version = resolve_version_for_plugin(
+            name,
+            &plugin_config.version,
+            registry.as_ref(),
+            verbose
+        );
+
         if dry_run {
             println!("  {} Would install {} @ {} from {}",
                 "→".cyan(),
                 name.bold(),
-                plugin_config.version.green(),
+                resolved_version.green(),
                 source.dimmed()
             );
+            if plugin_config.version != resolved_version {
+                println!("    {} {} → {}",
+                    "ℹ".blue(),
+                    plugin_config.version.dimmed(),
+                    resolved_version.green()
+                );
+            }
             continue;
         }
 
@@ -70,11 +89,10 @@ pub fn run(config_path: &Path, plugin: Option<&str>, dry_run: bool, verbose: boo
         }
 
         // Install version
-        println!("  {} Installing {} @ {}...", "→".cyan(), name, plugin_config.version);
+        println!("  {} Installing {} @ {}...", "→".cyan(), name, resolved_version);
 
-        let version = resolve_version(&plugin_config.version);
         let install_result = Command::new("asdf")
-            .args(["install", name, &version])
+            .args(["install", name, &resolved_version])
             .output()
             .context("Failed to run asdf install")?;
 
@@ -86,7 +104,7 @@ pub fn run(config_path: &Path, plugin: Option<&str>, dry_run: bool, verbose: boo
 
         // Set global version
         let _ = Command::new("asdf")
-            .args(["global", name, &version])
+            .args(["global", name, &resolved_version])
             .output();
 
         // Run post-install commands
@@ -94,12 +112,19 @@ pub fn run(config_path: &Path, plugin: Option<&str>, dry_run: bool, verbose: boo
             if verbose {
                 println!("    Running: {}", cmd);
             }
-            let _ = Command::new("sh")
+            let post_result = Command::new("sh")
                 .args(["-c", cmd])
                 .output();
+
+            if let Ok(output) = post_result {
+                if !output.status.success() && verbose {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    println!("    {} Post-install warning: {}", "!".yellow(), stderr.trim());
+                }
+            }
         }
 
-        println!("  {} Installed {} @ {}", "✓".green(), name.bold(), version.green());
+        println!("  {} Installed {} @ {}", "✓".green(), name.bold(), resolved_version.green());
     }
 
     println!();
@@ -117,15 +142,79 @@ fn get_plugin_source(name: &str, source: &str) -> String {
     }
 }
 
-fn resolve_version(constraint: &str) -> String {
-    // For now, simple resolution
+/// Resolve version constraint to an actual version string
+fn resolve_version_for_plugin(
+    plugin: &str,
+    constraint: &str,
+    registry: Option<&Registry>,
+    verbose: bool
+) -> String {
+    // If it's already a specific version (no operator), use it directly
+    if !constraint.starts_with('^')
+        && !constraint.starts_with('~')
+        && !constraint.starts_with('>')
+        && !constraint.starts_with('<')
+        && constraint != "latest"
+        && constraint != "stable"
+    {
+        return constraint.to_string();
+    }
+
+    // Try to get available versions and resolve
+    if let Some(registry) = registry {
+        if let Ok(versions) = registry.get_available_versions(plugin) {
+            if !versions.is_empty() {
+                if let Some(resolved) = resolve_version(constraint, &versions) {
+                    if verbose {
+                        println!("    Resolved {} to {}", constraint, resolved);
+                    }
+                    return resolved;
+                }
+            }
+        }
+    }
+
+    // Fallback: try asdf list-all directly
+    if let Ok(output) = Command::new("asdf")
+        .args(["list", "all", plugin])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let versions: Vec<Version> = stdout
+                .lines()
+                .filter_map(|line| Version::parse(line.trim()))
+                .collect();
+
+            if !versions.is_empty() {
+                if let Some(resolved) = resolve_version(constraint, &versions) {
+                    if verbose {
+                        println!("    Resolved {} to {} (via asdf)", constraint, resolved);
+                    }
+                    return resolved;
+                }
+            }
+        }
+    }
+
+    // Final fallback for special constraints
     match constraint {
         "latest" | "stable" => "latest".to_string(),
-        v if v.starts_with('^') || v.starts_with('~') || v.starts_with('>') || v.starts_with('<') => {
-            // Would need to query available versions and resolve
-            // For now, try latest
+        c if c.starts_with('^') || c.starts_with('~') => {
+            // Try to extract base version and use latest
+            if verbose {
+                println!("    Could not resolve {}, using 'latest'", constraint);
+            }
             "latest".to_string()
         }
-        v => v.to_string(),
+        c if c.starts_with(">=") => {
+            // Use the minimum version as fallback
+            c.trim_start_matches(">=").to_string()
+        }
+        c if c.starts_with('>') => {
+            // Use the minimum version as fallback
+            c.trim_start_matches('>').to_string()
+        }
+        _ => constraint.to_string(),
     }
 }
